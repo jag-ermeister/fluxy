@@ -195,7 +195,7 @@ def generate_image(
     clip_l: CLIPTextModel,
     t5xxl,
     ae,
-    prompt: str,
+    prompts: List[str],
     seed: Optional[int],
     image_width: int,
     image_height: int,
@@ -252,88 +252,89 @@ def generate_image(
     clip_l = clip_l.to(device)
     t5xxl = t5xxl.to(device)
 
-    def encode(prpt: str):
-        return l_pooled, t5_out, txt_ids, t5_attn_mask
+    for prompt in prompts:
+        def encode(prpt: str):
+            return l_pooled, t5_out, txt_ids, t5_attn_mask
 
-    l_pooled, t5_out, txt_ids, t5_attn_mask = encode(prompt)
-    if negative_prompt:
-        neg_l_pooled, neg_t5_out, _, neg_t5_attn_mask = encode(negative_prompt)
-    else:
-        neg_l_pooled, neg_t5_out, neg_t5_attn_mask = None, None, None
-
-    # NaN check
-    if torch.isnan(l_pooled).any():
-        raise ValueError("NaN in l_pooled")
-    if torch.isnan(t5_out).any():
-        raise ValueError("NaN in t5_out")
-
-    if args.offload:
-        clip_l = clip_l.cpu()
-        t5xxl = t5xxl.cpu()
-    # del clip_l, t5xxl
-    device_utils.clean_memory()
-
-    # generate image
-    logger.info("Generating image...")
-    model = model.to(device)
-    if steps is None:
-        steps = 4 if is_schnell else 50
-
-    img_ids = img_ids.to(device)
-    t5_attn_mask = t5_attn_mask.to(device) if args.apply_t5_attn_mask else None
-
-    x = do_sample(
-        accelerator,
-        model,
-        noise,
-        img_ids,
-        l_pooled,
-        t5_out,
-        txt_ids,
-        steps,
-        guidance,
-        t5_attn_mask,
-        is_schnell,
-        device,
-        flux_dtype,
-        neg_l_pooled,
-        neg_t5_out,
-        neg_t5_attn_mask,
-        cfg_scale,
-    )
-    if args.offload:
-        model = model.cpu()
-    # del model
-    device_utils.clean_memory()
-
-    # unpack
-    x = x.float()
-    x = einops.rearrange(x, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=packed_latent_height, w=packed_latent_width, ph=2, pw=2)
-
-    # decode
-    logger.info("Decoding image...")
-    ae = ae.to(device)
-    with torch.no_grad():
-        if is_fp8(ae_dtype):
-            with accelerator.autocast():
-                x = ae.decode(x)
+        l_pooled, t5_out, txt_ids, t5_attn_mask = encode(prompt)
+        if negative_prompt:
+            neg_l_pooled, neg_t5_out, _, neg_t5_attn_mask = encode(negative_prompt)
         else:
-            with torch.autocast(device_type=device.type, dtype=ae_dtype):
-                x = ae.decode(x)
-    if args.offload:
-        ae = ae.cpu()
+            neg_l_pooled, neg_t5_out, neg_t5_attn_mask = None, None, None
 
-    x = x.clamp(-1, 1)
-    x = x.permute(0, 2, 3, 1)
-    img = Image.fromarray((127.5 * (x + 1.0)).float().cpu().numpy().astype(np.uint8)[0])
+        # NaN check
+        if torch.isnan(l_pooled).any():
+            raise ValueError("NaN in l_pooled")
+        if torch.isnan(t5_out).any():
+            raise ValueError("NaN in t5_out")
 
-    # save image
-    output_dir = args.output_dir
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-    img.save(output_path)
+        if args.offload:
+            clip_l = clip_l.cpu()
+            t5xxl = t5xxl.cpu()
+        # del clip_l, t5xxl
+        device_utils.clean_memory()
 
-    logger.info(f"Saved image to {output_path}")
+        # generate image
+        logger.info("Generating image...")
+        model = model.to(device)
+        if steps is None:
+            steps = 4 if is_schnell else 50
+
+        img_ids = img_ids.to(device)
+        t5_attn_mask = t5_attn_mask.to(device) if args.apply_t5_attn_mask else None
+
+        x = do_sample(
+            accelerator,
+            model,
+            noise,
+            img_ids,
+            l_pooled,
+            t5_out,
+            txt_ids,
+            steps,
+            guidance,
+            t5_attn_mask,
+            is_schnell,
+            device,
+            flux_dtype,
+            neg_l_pooled,
+            neg_t5_out,
+            neg_t5_attn_mask,
+            cfg_scale,
+        )
+        if args.offload:
+            model = model.cpu()
+        # del model
+        device_utils.clean_memory()
+
+        # unpack
+        x = x.float()
+        x = einops.rearrange(x, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=packed_latent_height, w=packed_latent_width, ph=2, pw=2)
+
+        # decode
+        logger.info("Decoding image...")
+        ae = ae.to(device)
+        with torch.no_grad():
+            if is_fp8(ae_dtype):
+                with accelerator.autocast():
+                    x = ae.decode(x)
+            else:
+                with torch.autocast(device_type=device.type, dtype=ae_dtype):
+                    x = ae.decode(x)
+        if args.offload:
+            ae = ae.cpu()
+
+        x = x.clamp(-1, 1)
+        x = x.permute(0, 2, 3, 1)
+        img = Image.fromarray((127.5 * (x + 1.0)).float().cpu().numpy().astype(np.uint8)[0])
+
+        # save image
+        output_dir = args.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+        img.save(output_path)
+
+        logger.info(f"Saved image to {output_path}")
 
 
 if __name__ == "__main__":
@@ -477,7 +478,7 @@ if __name__ == "__main__":
             clip_l,
             t5xxl,
             ae,
-            args.prompt,
+            ['dog with a sign that says hello', 'woman on a beach'],
             args.seed,
             args.width,
             args.height,
